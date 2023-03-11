@@ -28,5 +28,7 @@ class Preprocessor:
         # we compute the target as described above here:
         target = joined.stack().add(1).groupby(level=[0, 1]).prod().sub(1).to_frame()
         return target
-    def oui(self):
+    
+    def create_features(self, df):
+        
         pass

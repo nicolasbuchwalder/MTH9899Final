@@ -6,7 +6,7 @@ class DataHandler:
     Datahandling class that gets the data and formats it
     """
     def __init__(self, read_path=None):
-        if path is None:
+        if read_path is None:
             self._read_path = (Path.cwd().parent / "data").resolve()
         else:
             self._read_path
@@ -60,7 +60,7 @@ class DataHandler:
         
         data.drop(["ID", "Date", "Time"], axis=1, inplace=True)
                                       
-        return data
+        return data.sort_index()
     
     def _intraday_file2date(self, file):
         return pd.to_datetime(file.stem)
