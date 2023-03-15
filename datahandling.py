@@ -24,7 +24,7 @@ class DataHandler:
             end = pd.to_datetime(end)
             
             
-        intraday_cols = ["Date", "Time", "Id", "CumReturnResid", "CumVolume"]
+        #intraday_cols = ["Date", "Time", "Id", "CumReturnResid", "CumVolume"]
         
         intraday_data_list = []
         for file in sorted((self._read_path / "intraday_data").resolve().glob("*.csv")):
@@ -35,11 +35,11 @@ class DataHandler:
             if file_date > end:
                 break
                 
-            intraday_data_list.append(pd.read_csv(file, parse_dates =["Date"], usecols=intraday_cols))
+            intraday_data_list.append(pd.read_csv(file, parse_dates =["Date"]))#, usecols=intraday_cols))
             
         intraday_data = pd.concat(intraday_data_list)
         
-        daily_cols = ["Date", "ID", "EST_VOL", "MDV_63", "Volume"]
+        #daily_cols = ["Date", "ID", "EST_VOL", "MDV_63", "Volume"]
         
         daily_data_list = []
         for file in sorted((self._read_path / "daily_data").resolve().glob("*.csv")):
@@ -50,7 +50,7 @@ class DataHandler:
             if file_date > end:
                 break
                 
-            daily_data_list.append(pd.read_csv(file, parse_dates =["Date"], usecols=daily_cols))
+            daily_data_list.append(pd.read_csv(file, parse_dates =["Date"]))#, usecols=daily_cols))
             
         daily_data = pd.concat(daily_data_list)
                                       
