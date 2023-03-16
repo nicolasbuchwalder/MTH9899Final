@@ -132,11 +132,14 @@ class Preprocessor:
         self._rolling_features = rolling_features.sort_index()
         return self._rolling_features
     
-    def run(self):
+    def run(self, daily_ticks=20, intraday_ticks=26, scale_to_bps=True):
         self.create_target()
         self.create_rolling_features()
         self._target.index.rename(None, level=0, inplace=True)
-        return self._rolling_features.merge(self._target, left_index=True, right_index=True)
+        merged = self._rolling_features.merge(self._target, left_index=True, right_index=True)
+        if scale_to_bps:
+            return merged.mul(1e4)
+        return merged
     
    
     
