@@ -1,19 +1,23 @@
 import numpy as np
 import pandas as pd
 import datetime as dt
+import pickle
+from scipy import stats
 
 class Preprocessor:
     """
     Preprocessing class that handles all the preprocessing for the project
     """
-    def __init__(self, raw_df):
+    def __init__(self, raw_df, mod):
         self._raw_df = raw_df
+        self._mod = mod
+
         self._target = None
         self._daily_features = None
         self._intraday_features = None
         self._rolling_intraday_features = None
         self._rolling_daily_features = None
-        
+        self._hmm_feature = None
         
         
     def create_target(self, normalize_by_vol=True, clip_values=True, clip_quantiles=(0.01, 0.99)):
@@ -59,14 +63,17 @@ class Preprocessor:
         
         return self._target
     
+
     def create_daily_features(self):
         """
         Function to create features for each day
         """
+        # daily returns is just the target one day in the past
         daily_returns = self._target.groupby(level=0).shift(1).dropna()
         
         return self._daily_features
         
+    
     def create_raw_intraday_features(self):
         """
         Function to create features at each tick (remove cumulative)
@@ -88,32 +95,40 @@ class Preprocessor:
         return self._intraday_features
     
     def create_rolling_features(self, daily_ticks=20, intraday_ticks=26):
+        """
+        Creating a dataset where each row has past daily_ticks daily returns in the past and intraday_ticks 15min returns  
+        """
         
         self.create_raw_intraday_features()
         self._daily_features = self._target.groupby(level=0).shift(1).dropna()
         
+        # function that uses numpy strides to get rolling features
         def strided_app(a, L):
             nrows = ((a.size-L))+1
             n = a.strides[0]
             return np.lib.stride_tricks.as_strided(a, shape=(nrows,L), strides=(n,n))
         
         intraday_data = []
-        
+        # going over each id
         for Id, id_data in self._intraday_features.groupby(level=0):
+            # creating a nan dataframe so that strided app can have a longer window size than the number of datapoints until 3:30 on the first day
             start_index = id_data.index.get_level_values(1)[0]
             filled_up_index = pd.date_range(start=start_index - pd.DateOffset(minutes=15*intraday_ticks), end=start_index, freq="15T", inclusive="left")
             filled_up_df = pd.DataFrame(np.nan, index=pd.MultiIndex.from_arrays([[Id] * len(filled_up_index), filled_up_index]), columns=id_data.columns)
             id_data = pd.concat([filled_up_df, id_data])
+            # getting the rolling features for that id
             arr = np.stack([strided_app(id_data["ResidReturn"].to_numpy(copy=False),L=intraday_ticks), strided_app(id_data["Volume"].to_numpy(copy=False),L=intraday_ticks)], axis=1)
             mask = id_data.index[intraday_ticks-1:].get_level_values(1).time == dt.time(15,30)
             days = id_data.index[intraday_ticks-1:].get_level_values(1)[mask].normalize()
+            # getting the data
             intraday_data.append(pd.DataFrame(arr[mask].reshape(-1, intraday_ticks * 2), index=pd.MultiIndex.from_arrays([[Id] * len(days), days])))
+        # concatenating all the id features together
         rolling_intraday_features = pd.concat(intraday_data)
         rolling_intraday_features.columns = ["ResidReturnT-" + str(i) for i in range(rolling_intraday_features.shape[1]//2, 0, -1)] + ["Volume-" + str(i) for i in range(rolling_intraday_features.shape[1]//2, 0, -1)]
         
         self._rolling_intraday_features = rolling_intraday_features
         
-        
+        # doing exaclty the same but for daily features
         daily_data = []
         
         for Id, id_data in self._daily_features.groupby(level=0):
@@ -127,25 +142,61 @@ class Preprocessor:
         rolling_daily_features.columns = ["ResidReturnD-" + str(i) for i in range(rolling_daily_features.shape[1], 0, -1)] 
         
         self._rolling_daily_features = rolling_daily_features
-        
+        # concatenating both daily and intraday features together
         rolling_features = pd.concat([rolling_daily_features, rolling_intraday_features], axis=1)
         self._rolling_features = rolling_features.sort_index()
         return self._rolling_features
     
-    def run(self, daily_ticks=20, intraday_ticks=26, scale_to_bps=True):
+    # creating market regime feature
+    def create_hmm_feature(self):
+        # gathering all the models to boost
+        hmm_models = []
+        for file in sorted((self._mod / "HMM").resolve().glob("*.pkl")):
+            with open(file, "rb") as file: 
+                hmm_model = pickle.load(file)
+            hmm_models.append(hmm_model)
+        # getting the "index" return (weighted average of MDV)
+        hmm_train = (self._market_weights.rename("ResidReturnD-1") * self._rolling_features["ResidReturnD-1"]).fillna(0).groupby(level=1).sum().to_numpy().reshape(-1, 1)
+        # predicting for each model
+        preds = []
+        for model in hmm_models:
+            preds.append(model.predict(hmm_train))
+        # taking the mode of each point to remove variance
+        y_pred_train = stats.mode(np.concatenate(preds).reshape(len(hmm_models), -1), keepdims=False)[0]
+        # filling up all the data (same value for all one day)
+        self._rolling_features["Market Regime"] = np.NaN
+        for i, date in enumerate(self._rolling_features.index.get_level_values(1).unique()):
+            self._rolling_features.loc[(slice(None), date), "Market Regime"] = y_pred_train[i]
+        
+    # creating the whole dataset
+    def create_dataset(self, daily_ticks=20, intraday_ticks=26, scale_to_bps=True):
         self.create_target()
         self.create_rolling_features()
+        self.create_weights()
+        self.create_hmm_feature()
         self._target.index.rename(None, level=0, inplace=True)
-        merged = self._rolling_features.merge(self._target, left_index=True, right_index=True)
+        with_weights = self._rolling_features.merge(self._market_weights, left_index=True, right_index=True)
+        merged = with_weights.merge(self._target, left_index=True, right_index=True)
+        # scaling to bps the returns
         if scale_to_bps:
-            return merged.mul(1e4)
+            merged.loc[:, merged.columns[merged.columns.str.contains('ResidReturn')].tolist() + ["Target"]] *= 1e4
         return merged
     
-   
-    
+    # creating the sample weights
+    def create_weights(self):
+        market_weights = np.sqrt(self._raw_df.set_index("Id", append=True).groupby([pd.Grouper(level=0, freq="D"), pd.Grouper(level=1)])["MDV_63"].first())
+        market_weights = market_weights / market_weights.groupby(level=0).transform('sum')
+        market_weights.index.rename((None, None), inplace=True)
+        self._market_weights = market_weights.swaplevel(0,1).rename("Sample Weights")
+         
+
+            
 class Standardizer:
-    
+    """
+    Module to scale down to mu=0, sigma=1 all the data, adapted from sklearn.StandardScaler() but also handles unexisting names and varying data size (because of turnover)
+    """    
     def fit(self, series):
+
         exp_series = series.unstack(level=0)
         means = exp_series.mean()
         mean_means = means.mean()
@@ -172,8 +223,6 @@ class Standardizer:
 
         return exp_series.apply(normalize)
     
-    def inverse_transform(self, series):
-        pass
         
 
         
